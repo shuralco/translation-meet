@@ -4,6 +4,7 @@ const ws = new WebSocket(signalingUrl);
 const els = {
   room: document.getElementById('room'),
   name: document.getElementById('name'),
+  model: document.getElementById('model'),
   join: document.getElementById('join'),
   leave: document.getElementById('leave'),
   mic: document.getElementById('mic'),
@@ -28,7 +29,10 @@ const state = {
   transcriptLog: [],
   sttSocket: null,
   sttRecorder: null,
+  deepgramModel: 'nova-3',
 };
+
+const SUPPORTED_MODELS = ['nova-3', 'nova-2'];
 
 const iceServers = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -38,6 +42,7 @@ const iceServers = [
 const searchParams = new URLSearchParams(window.location.search);
 const presetRoom = searchParams.get('room');
 const presetName = searchParams.get('name');
+const presetModel = searchParams.get('dgModel');
 
 if (presetRoom) {
   els.room.value = presetRoom;
@@ -56,6 +61,25 @@ if (presetName) {
   els.name.value = storedName;
 }
 
+function resolveModel(value) {
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  return SUPPORTED_MODELS.find((model) => model === normalized) || null;
+}
+
+let storedModel = null;
+try {
+  storedModel = localStorage.getItem('deepgramModel');
+} catch {
+  storedModel = null;
+}
+
+const initialModel = resolveModel(presetModel) || resolveModel(storedModel) || state.deepgramModel;
+state.deepgramModel = initialModel;
+if (els.model) {
+  els.model.value = initialModel;
+}
+
 function updateInviteButtonState() {
   const hasRoom = Boolean((state.roomId || els.room.value || '').trim());
   els.invite.disabled = !hasRoom;
@@ -65,6 +89,23 @@ function updateInviteButtonState() {
 }
 
 updateInviteButtonState();
+
+if (els.model) {
+  els.model.addEventListener('change', () => {
+    const selected = resolveModel(els.model.value);
+    if (!selected) {
+      els.model.value = state.deepgramModel;
+      return;
+    }
+    if (selected === state.deepgramModel) return;
+    state.deepgramModel = selected;
+    storeModelPreference(selected);
+    updateHistory();
+    if (state.roomId && state.localStream) {
+      startTranscriptionStream();
+    }
+  });
+}
 
 ws.addEventListener('open', () => {
   console.log('Signaling socket ready');
@@ -119,6 +160,12 @@ function storeDisplayName() {
   } catch {}
 }
 
+function storeModelPreference(model) {
+  try {
+    localStorage.setItem('deepgramModel', model);
+  } catch {}
+}
+
 function buildInviteLink() {
   const roomId = (state.roomId || els.room.value || '').trim();
   if (!roomId) return null;
@@ -129,6 +176,9 @@ function buildInviteLink() {
     url.searchParams.set('name', displayName);
   } else {
     url.searchParams.delete('name');
+  }
+  if (state.deepgramModel) {
+    url.searchParams.set('dgModel', state.deepgramModel);
   }
   return url.toString();
 }
@@ -388,7 +438,8 @@ function startTranscriptionStream() {
     state.sttSocket.close();
   }
   const name = encodeURIComponent(els.name.value || 'Учасник');
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stt?roomId=${encodeURIComponent(state.roomId)}&participantId=${encodeURIComponent(state.clientId)}&name=${name}`;
+  const model = encodeURIComponent(state.deepgramModel || SUPPORTED_MODELS[0]);
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stt?roomId=${encodeURIComponent(state.roomId)}&participantId=${encodeURIComponent(state.clientId)}&name=${name}&model=${model}`;
   const sttSocket = new WebSocket(url);
   sttSocket.binaryType = 'arraybuffer';
   state.sttSocket = sttSocket;

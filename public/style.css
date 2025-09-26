@@ -2,7 +2,7 @@
 body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
 header, footer { padding: 10px 16px; background: #111; color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 header .left, header .right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-header input, header button { margin: 0; }
+header input, header select, header button { margin: 0; }
 main { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 12px; padding: 12px; }
 .videos { position: relative; display: flex; flex-direction: column; gap: 12px; min-height: 480px; }
 .remote-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }

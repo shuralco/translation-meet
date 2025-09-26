@@ -5,6 +5,9 @@ const { v4: uuidv4 } = require('uuid');
 const { URL } = require('url');
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+const allowedDeepgramModels = new Set(['nova-3', 'nova-2']);
+const envModel = (process.env.DEEPGRAM_MODEL || '').toLowerCase();
+const DEFAULT_DEEPGRAM_MODEL = allowedDeepgramModels.has(envModel) ? envModel : 'nova-3';
 
 const app = express();
 app.use(express.static('public'));
@@ -153,8 +156,13 @@ transcriptionServer.on('connection', (client, req) => {
     return;
   }
 
+  const requestedModel = (reqUrl.searchParams.get('model') || '').toLowerCase();
+  const resolvedModel = allowedDeepgramModels.has(requestedModel)
+    ? requestedModel
+    : DEFAULT_DEEPGRAM_MODEL;
+
   const dgUrl = new URL('wss://api.deepgram.com/v1/listen');
-  dgUrl.searchParams.set('model', 'nova-2');
+  dgUrl.searchParams.set('model', resolvedModel);
   dgUrl.searchParams.set('language', 'uk');
   dgUrl.searchParams.set('punctuate', 'true');
   dgUrl.searchParams.set('smart_format', 'true');
