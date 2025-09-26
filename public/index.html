@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple Meet + Transcribe</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="left">
+      <input id="room" placeholder="ID кімнати" />
+      <input id="name" placeholder="Ваше ім'я" />
+      <select id="lang">
+        <option value="en-US">English (US)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="uk-UA" selected>Українська</option>
+        <option value="pl-PL">Polski</option>
+        <option value="de-DE">Deutsch</option>
+        <option value="fr-FR">Français</option>
+        <option value="es-ES">Español</option>
+      </select>
+      <button id="join">Увійти</button>
+      <button id="leave" disabled>Вийти</button>
+      <button id="invite">🔗 Поділитися кімнатою</button>
+    </div>
+    <div class="right">
+      <button id="mic" disabled>🎤 Мікрофон вкл</button>
+      <button id="cam" disabled>📷 Камера вкл</button>
+      <button id="share" disabled>🖥️ Шерити екран</button>
+      <button id="download" disabled>⬇️ Завантажити транскрипт</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="videos">
+      <div class="video-wrapper">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <div id="remoteSubs" class="subs"></div>
+      </div>
+      <div class="video-wrapper self">
+        <video id="localVideo" autoplay playsinline muted></video>
+        <div id="localSubs" class="subs"></div>
+      </div>
+    </section>
+    <section class="log">
+      <h3>Транскрипт</h3>
+      <div id="log"></div>
+    </section>
+  </main>
+
+  <footer>
+    <small>Demo • WebRTC + Web Speech API. Для продакшену підключіть стрімінговий STT і TURN.</small>
+  </footer>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
