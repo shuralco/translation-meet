@@ -29,10 +29,10 @@ const state = {
   transcriptLog: [],
   sttSocket: null,
   sttRecorder: null,
-  deepgramModel: 'nova-3',
+  deepgramModel: 'nova-2',
 };
 
-const SUPPORTED_MODELS = ['nova-3', 'nova-2'];
+const SUPPORTED_MODELS = ['nova-2'];
 
 const iceServers = [
   { urls: 'stun:stun.l.google.com:19302' },

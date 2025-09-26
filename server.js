@@ -5,9 +5,9 @@ const { v4: uuidv4 } = require('uuid');
 const { URL } = require('url');
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
-const allowedDeepgramModels = new Set(['nova-3', 'nova-2']);
+const allowedDeepgramModels = new Set(['nova-2']);
 const envModel = (process.env.DEEPGRAM_MODEL || '').toLowerCase();
-const DEFAULT_DEEPGRAM_MODEL = allowedDeepgramModels.has(envModel) ? envModel : 'nova-3';
+const DEFAULT_DEEPGRAM_MODEL = allowedDeepgramModels.has(envModel) ? envModel : 'nova-2';
 
 const app = express();
 app.use(express.static('public'));
