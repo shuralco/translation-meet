@@ -11,15 +11,6 @@
     <div class="left">
       <input id="room" placeholder="ID кімнати" />
       <input id="name" placeholder="Ваше ім'я" />
-      <select id="lang">
-        <option value="en-US">English (US)</option>
-        <option value="en-GB">English (UK)</option>
-        <option value="uk-UA" selected>Українська</option>
-        <option value="pl-PL">Polski</option>
-        <option value="de-DE">Deutsch</option>
-        <option value="fr-FR">Français</option>
-        <option value="es-ES">Español</option>
-      </select>
       <button id="join">Увійти</button>
       <button id="leave" disabled>Вийти</button>
       <button id="invite">🔗 Поділитися кімнатою</button>
@@ -34,12 +25,10 @@
 
   <main>
     <section class="videos">
-      <div class="video-wrapper">
-        <video id="remoteVideo" autoplay playsinline></video>
-        <div id="remoteSubs" class="subs"></div>
-      </div>
+      <div id="remoteVideos" class="remote-grid" aria-live="polite"></div>
       <div class="video-wrapper self">
         <video id="localVideo" autoplay playsinline muted></video>
+        <div class="label" id="localLabel">Ви</div>
         <div id="localSubs" class="subs"></div>
       </div>
     </section>
@@ -50,7 +39,7 @@
   </main>
 
   <footer>
-    <small>Demo • WebRTC + Web Speech API. Для продакшену підключіть стрімінговий STT і TURN.</small>
+    <small>Demo • WebRTC + Deepgram Nova-2 (uk-UA) для транскрибації. Для продакшену додайте TURN.</small>
   </footer>
 
   <script src="app.js" type="module"></script>

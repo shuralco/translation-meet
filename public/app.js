@@ -1,4 +1,5 @@
-const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+const signalingUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+const ws = new WebSocket(signalingUrl);
 
 const els = {
   room: document.getElementById('room'),
@@ -10,29 +11,33 @@ const els = {
   share: document.getElementById('share'),
   download: document.getElementById('download'),
   invite: document.getElementById('invite'),
-  lang: document.getElementById('lang'),
   localVideo: document.getElementById('localVideo'),
-  remoteVideo: document.getElementById('remoteVideo'),
   localSubs: document.getElementById('localSubs'),
-  remoteSubs: document.getElementById('remoteSubs'),
+  localLabel: document.getElementById('localLabel'),
+  remoteVideos: document.getElementById('remoteVideos'),
   log: document.getElementById('log'),
 };
 
-let pc;
-let isPolite = false;
-let makingOffer = false;
-let ignoreOffer = false;
-let localStream;
-let screenActive = false;
-let dataChannel;
-const transcriptLog = [];
-let recognition;
-let joinedRoomId = null;
+const state = {
+  roomId: null,
+  clientId: null,
+  localStream: null,
+  originalVideoTrack: null,
+  screenActive: false,
+  peers: new Map(),
+  transcriptLog: [],
+  sttSocket: null,
+  sttRecorder: null,
+};
+
+const iceServers = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  // Add TURN credentials for production deployments
+];
 
 const searchParams = new URLSearchParams(window.location.search);
 const presetRoom = searchParams.get('room');
 const presetName = searchParams.get('name');
-const presetLang = searchParams.get('lang');
 
 if (presetRoom) {
   els.room.value = presetRoom;
@@ -51,15 +56,8 @@ if (presetName) {
   els.name.value = storedName;
 }
 
-if (presetLang) {
-  const hasLang = Array.from(els.lang.options).some((option) => option.value === presetLang);
-  if (hasLang) {
-    els.lang.value = presetLang;
-  }
-}
-
 function updateInviteButtonState() {
-  const hasRoom = Boolean(els.room.value.trim());
+  const hasRoom = Boolean((state.roomId || els.room.value || '').trim());
   els.invite.disabled = !hasRoom;
   if (!hasRoom) {
     els.invite.textContent = '🔗 Поділитися кімнатою';
@@ -68,72 +66,61 @@ function updateInviteButtonState() {
 
 updateInviteButtonState();
 
-const iceServers = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  // Add TURN servers here for production usage
-];
-
 ws.addEventListener('open', () => {
-  console.log('WebSocket connected');
+  console.log('Signaling socket ready');
 });
 
 ws.addEventListener('close', () => {
-  console.log('WebSocket closed');
+  console.log('Signaling socket closed');
 });
 
 ws.addEventListener('message', async (event) => {
   const msg = JSON.parse(event.data);
-  if (msg.type === 'joined') {
-    isPolite = Boolean(msg.isPolite);
-    joinedRoomId = msg.roomId;
-    updateInviteButtonState();
-    updateHistory(joinedRoomId);
-    await startCall();
-    return;
-  }
-  if (msg.type === 'room-full') {
-    alert('Кімната вже зайнята двома учасниками.');
-    resetJoinButtons();
-    return;
-  }
-  if (msg.type === 'signal' && pc) {
-    const { description, candidate } = msg.payload || {};
-    try {
-      if (description) {
-        const offerCollision = description.type === 'offer' && (makingOffer || pc.signalingState !== 'stable');
-        ignoreOffer = !isPolite && offerCollision;
-        if (ignoreOffer) return;
-
-        await pc.setRemoteDescription(description);
-        if (description.type === 'offer') {
-          await pc.setLocalDescription(await pc.createAnswer());
-          sendSignal({ description: pc.localDescription });
-        }
-      } else if (candidate) {
-        if (!ignoreOffer) {
-          await pc.addIceCandidate(candidate);
-        }
-      }
-    } catch (err) {
-      console.error('Error handling signal', err);
-    }
-    return;
-  }
-  if (msg.type === 'transcript') {
-    const payload = { speaker: msg.from || 'Peer', text: msg.text, final: msg.final, ts: msg.ts };
-    pushTranscript(payload);
-    showRemoteSubtitle(payload);
+  switch (msg.type) {
+    case 'joined':
+      state.clientId = msg.id;
+      state.roomId = msg.roomId;
+      updateHistory();
+      updateInviteButtonState();
+      els.localLabel.textContent = (els.name.value || 'Ви').trim() || 'Ви';
+      storeDisplayName();
+      await startCall(msg.peers || []);
+      break;
+    case 'room-full':
+      alert(`Кімната вже зайнята максимумом учасників (${msg.max || 4}).`);
+      resetJoinButtons();
+      break;
+    case 'peer-joined':
+      onPeerJoined(msg);
+      break;
+    case 'signal':
+      await handleSignal(msg);
+      break;
+    case 'peer-left':
+      removePeer(msg.id);
+      break;
+    case 'transcript':
+      handleTranscript(msg);
+      break;
+    default:
+      break;
   }
 });
 
-function sendSignal(payload) {
+function sendSignalingMessage(payload) {
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'signal', payload }));
+    ws.send(JSON.stringify(payload));
   }
 }
 
-function buildInviteLink(roomIdOverride) {
-  const roomId = (roomIdOverride || els.room.value || '').trim();
+function storeDisplayName() {
+  try {
+    localStorage.setItem('displayName', els.name.value.trim());
+  } catch {}
+}
+
+function buildInviteLink() {
+  const roomId = (state.roomId || els.room.value || '').trim();
   if (!roomId) return null;
   const url = new URL(window.location.href);
   url.searchParams.set('room', roomId);
@@ -143,21 +130,18 @@ function buildInviteLink(roomIdOverride) {
   } else {
     url.searchParams.delete('name');
   }
-  if (els.lang.value) {
-    url.searchParams.set('lang', els.lang.value);
-  }
   return url.toString();
 }
 
-function updateHistory(roomIdOverride) {
-  const link = buildInviteLink(roomIdOverride);
+function updateHistory() {
+  const link = buildInviteLink();
   if (!link) return;
   const url = new URL(link);
   history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
 async function copyInviteLink() {
-  const link = buildInviteLink(joinedRoomId);
+  const link = buildInviteLink();
   if (!link) {
     alert('Спочатку вкажіть ID кімнати.');
     return;
@@ -174,346 +158,398 @@ async function copyInviteLink() {
   }
 }
 
-async function startCall() {
-  els.leave.disabled = false;
-  els.mic.disabled = false;
-  els.cam.disabled = false;
-  els.share.disabled = false;
-  els.download.disabled = false;
-
-  localStream = await navigator.mediaDevices.getUserMedia({
-    audio: true,
-    video: { width: 1280, height: 720 },
-  });
-  els.localVideo.srcObject = localStream;
-
-  pc = new RTCPeerConnection({ iceServers });
-  localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      sendSignal({ candidate: event.candidate });
-    }
-  };
-
-  pc.ontrack = (event) => {
-    if (!els.remoteVideo.srcObject) {
-      els.remoteVideo.srcObject = event.streams[0];
-    }
-  };
-
-  if (!isPolite) {
-    dataChannel = pc.createDataChannel('captions', { ordered: true });
-    wireDataChannel(dataChannel);
-  } else {
-    pc.ondatachannel = (event) => {
-      dataChannel = event.channel;
-      wireDataChannel(dataChannel);
-    };
+async function startCall(existingPeers) {
+  toggleControls(true);
+  if (!state.localStream) {
+    state.localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: false,
+      },
+      video: { width: 1280, height: 720 },
+    });
+    els.localVideo.srcObject = state.localStream;
+    state.originalVideoTrack = state.localStream.getVideoTracks()[0] || null;
+    startTranscriptionStream();
   }
 
-  pc.onnegotiationneeded = async () => {
+  for (const peerInfo of existingPeers) {
+    createPeerConnection(peerInfo.id, peerInfo.name, { initiator: true });
+  }
+}
+
+function toggleControls(inCall) {
+  els.join.disabled = inCall;
+  els.leave.disabled = !inCall;
+  els.mic.disabled = !inCall;
+  els.cam.disabled = !inCall;
+  els.share.disabled = !inCall;
+  els.download.disabled = !inCall;
+  if (inCall) {
+    els.mic.textContent = '🎤 Мікрофон вкл';
+    els.cam.textContent = '📷 Камера вкл';
+  }
+}
+
+function onPeerJoined({ id, name }) {
+  if (!state.localStream) return;
+  if (state.peers.has(id)) return;
+  createPeerConnection(id, name, { initiator: false });
+}
+
+function createPeerConnection(peerId, name, { initiator }) {
+  const peer = {
+    id: peerId,
+    name: name || 'Учасник',
+    pc: new RTCPeerConnection({ iceServers }),
+    makingOffer: false,
+    ignoreOffer: false,
+    polite: !initiator,
+    videoSender: null,
+    audioSender: null,
+    subsTimeout: null,
+    elements: createRemoteElements(peerId, name),
+  };
+
+  state.peers.set(peerId, peer);
+
+  for (const track of state.localStream.getTracks()) {
+    const sender = peer.pc.addTrack(track, state.localStream);
+    if (track.kind === 'video') peer.videoSender = sender;
+    if (track.kind === 'audio') peer.audioSender = sender;
+  }
+
+  peer.pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      sendSignalingMessage({ type: 'signal', target: peerId, payload: { candidate: event.candidate } });
+    }
+  };
+
+  peer.pc.ontrack = (event) => {
+    const [stream] = event.streams;
+    if (stream) {
+      peer.elements.video.srcObject = stream;
+    }
+  };
+
+  peer.pc.onconnectionstatechange = () => {
+    if (peer.pc.connectionState === 'failed' || peer.pc.connectionState === 'closed') {
+      removePeer(peerId);
+    }
+  };
+
+  peer.pc.onnegotiationneeded = async () => {
     try {
-      makingOffer = true;
-      await pc.setLocalDescription(await pc.createOffer());
-      sendSignal({ description: pc.localDescription });
+      peer.makingOffer = true;
+      await peer.pc.setLocalDescription(await peer.pc.createOffer());
+      sendSignalingMessage({ type: 'signal', target: peerId, payload: { description: peer.pc.localDescription } });
     } catch (err) {
       console.error('Negotiation error', err);
     } finally {
-      makingOffer = false;
+      peer.makingOffer = false;
     }
   };
 
-  els.remoteVideo.play().catch(() => {});
-
-  startLocalSTT();
+  // Kick off negotiation for initiators once tracks are added.
+  if (initiator) {
+    peer.pc.onnegotiationneeded();
+  }
 }
 
-function wireDataChannel(channel) {
-  channel.onopen = () => console.log('DataChannel open');
-  channel.onclose = () => console.log('DataChannel closed');
-  channel.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      if (msg.kind === 'transcript') {
-        const payload = { speaker: msg.from || 'Peer', text: msg.text, final: msg.final, ts: msg.ts };
-        pushTranscript(payload);
-        showRemoteSubtitle(payload);
+async function handleSignal({ from, payload }) {
+  const peer = state.peers.get(from);
+  if (!peer) return;
+  const { description, candidate } = payload || {};
+  try {
+    if (description) {
+      const offerCollision = description.type === 'offer' && (peer.makingOffer || peer.pc.signalingState !== 'stable');
+      peer.ignoreOffer = !peer.polite && offerCollision;
+      if (peer.ignoreOffer) return;
+
+      await peer.pc.setRemoteDescription(description);
+      if (description.type === 'offer') {
+        await peer.pc.setLocalDescription(await peer.pc.createAnswer());
+        sendSignalingMessage({ type: 'signal', target: from, payload: { description: peer.pc.localDescription } });
       }
-    } catch (err) {
-      console.warn('Invalid datachannel message', err);
+    } else if (candidate) {
+      try {
+        await peer.pc.addIceCandidate(candidate);
+      } catch (err) {
+        if (!peer.ignoreOffer) {
+          throw err;
+        }
+      }
     }
-  };
+  } catch (err) {
+    console.error('Signal handling error', err);
+  }
 }
 
-function pushTranscript({ speaker, text, final = false, ts = Date.now() }) {
+function removePeer(peerId) {
+  const peer = state.peers.get(peerId);
+  if (!peer) return;
+  peer.pc.close();
+  if (peer.elements.wrapper.parentElement) {
+    peer.elements.wrapper.parentElement.removeChild(peer.elements.wrapper);
+  }
+  if (peer.subsTimeout) {
+    clearTimeout(peer.subsTimeout);
+  }
+  state.peers.delete(peerId);
+}
+
+function createRemoteElements(peerId, name) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'video-wrapper';
+  wrapper.dataset.peerId = peerId;
+
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.playsInline = true;
+
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = name || 'Учасник';
+
+  const subs = document.createElement('div');
+  subs.className = 'subs';
+
+  wrapper.appendChild(video);
+  wrapper.appendChild(label);
+  wrapper.appendChild(subs);
+  els.remoteVideos.appendChild(wrapper);
+
+  return { wrapper, video, label, subs };
+}
+
+function handleTranscript({ participantId, name, text, final, ts }) {
   if (!text) return;
-  transcriptLog.push({ speaker, text, final, ts });
+  const entry = {
+    speakerId: participantId,
+    speaker: name || 'Учасник',
+    text,
+    final: Boolean(final),
+    ts: ts || Date.now(),
+  };
+  pushTranscript(entry);
+  updateSubtitle(entry);
+}
+
+function pushTranscript(entry) {
+  state.transcriptLog.push(entry);
   const div = document.createElement('div');
-  const currentName = (els.name.value || 'Me').trim() || 'Me';
-  div.className = `msg ${speaker === currentName ? 'me' : 'peer'}`;
-  div.textContent = `[${new Date(ts).toLocaleTimeString()}] ${speaker}: ${text}`;
+  const isSelf = entry.speakerId === state.clientId;
+  div.className = `msg ${isSelf ? 'me' : 'peer'}`;
+  div.textContent = `[${new Date(entry.ts).toLocaleTimeString()}] ${entry.speaker}: ${entry.text}`;
   els.log.appendChild(div);
   els.log.scrollTop = els.log.scrollHeight;
 }
 
-function showRemoteSubtitle({ text, final }) {
-  if (!text) return;
-  els.remoteSubs.textContent = text;
-  if (final) {
-    setTimeout(() => {
-      els.remoteSubs.textContent = '';
-    }, 1800);
-  }
-}
-
-function showLocalSubtitle(text) {
-  els.localSubs.textContent = text;
-}
-
-function sendCaption(text, final = false) {
-  if (!text) return;
-  const payload = {
-    kind: 'transcript',
-    from: (els.name.value || 'Me').trim() || 'Me',
-    text,
-    final,
-    ts: Date.now(),
-  };
-  if (dataChannel && dataChannel.readyState === 'open') {
-    dataChannel.send(JSON.stringify(payload));
-  } else if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'transcript', data: payload }));
-  }
-}
-
-function startLocalSTT() {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    showLocalSubtitle('SpeechRecognition не підтримується в цьому браузері.');
+function updateSubtitle(entry) {
+  if (entry.speakerId === state.clientId) {
+    els.localSubs.textContent = entry.text;
+    if (entry.final) {
+      const textSnapshot = entry.text;
+      setTimeout(() => {
+        if (els.localSubs.textContent === textSnapshot) {
+          els.localSubs.textContent = '';
+        }
+      }, 2000);
+    }
     return;
   }
-  recognition = new SpeechRecognition();
-  recognition.lang = els.lang.value || 'uk-UA';
-  recognition.continuous = true;
-  recognition.interimResults = true;
 
-  recognition.onresult = (event) => {
-    let interim = '';
-    let finalText = '';
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
-      const result = event.results[i];
-      if (result.isFinal) {
-        finalText += `${result[0].transcript.trim()} `;
-      } else {
-        interim += result[0].transcript;
+  const peer = state.peers.get(entry.speakerId);
+  if (!peer) return;
+  peer.elements.label.textContent = entry.speaker || peer.elements.label.textContent;
+  peer.elements.subs.textContent = entry.text;
+  if (peer.subsTimeout) {
+    clearTimeout(peer.subsTimeout);
+  }
+  if (entry.final) {
+    const textSnapshot = entry.text;
+    peer.subsTimeout = setTimeout(() => {
+      if (peer.elements.subs.textContent === textSnapshot) {
+        peer.elements.subs.textContent = '';
       }
-    }
-    if (interim) {
-      showLocalSubtitle(interim);
-      sendCaption(interim, false);
-      pushTranscript({ speaker: (els.name.value || 'Me').trim() || 'Me', text: interim, final: false });
-    }
-    if (finalText) {
-      const text = finalText.trim();
-      showLocalSubtitle('');
-      sendCaption(text, true);
-      pushTranscript({ speaker: (els.name.value || 'Me').trim() || 'Me', text, final: true });
-    }
-  };
-
-  recognition.onerror = (event) => {
-    console.warn('STT error', event.error);
-  };
-
-  recognition.onend = () => {
-    if (pc && !els.leave.disabled) {
-      try {
-        recognition.start();
-      } catch (err) {
-        console.warn('Failed to restart recognition', err);
-      }
-    }
-  };
-
-  try {
-    recognition.start();
-  } catch (err) {
-    console.warn('Failed to start recognition', err);
+    }, 2000);
   }
 }
 
-function stopLocalSTT() {
-  if (recognition) {
-    try {
-      recognition.onresult = null;
-      recognition.onend = null;
-      recognition.stop();
-    } catch (err) {
-      console.warn('Failed to stop recognition', err);
-    }
-    recognition = null;
+function startTranscriptionStream() {
+  if (!state.roomId || !state.clientId || !state.localStream) return;
+  if (typeof MediaRecorder === 'undefined') {
+    console.warn('MediaRecorder не підтримується цим браузером.');
+    return;
   }
-  showLocalSubtitle('');
+  if (state.sttSocket) {
+    state.sttSocket.close();
+  }
+  const name = encodeURIComponent(els.name.value || 'Учасник');
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stt?roomId=${encodeURIComponent(state.roomId)}&participantId=${encodeURIComponent(state.clientId)}&name=${name}`;
+  const sttSocket = new WebSocket(url);
+  sttSocket.binaryType = 'arraybuffer';
+  state.sttSocket = sttSocket;
+
+  sttSocket.addEventListener('open', () => {
+    if (state.sttRecorder && state.sttRecorder.state !== 'inactive') {
+      state.sttRecorder.stop();
+    }
+    const recorder = new MediaRecorder(state.localStream, {
+      mimeType: 'audio/webm;codecs=opus',
+      audioBitsPerSecond: 128000,
+    });
+    recorder.addEventListener('dataavailable', (event) => {
+      if (event.data && event.data.size > 0 && sttSocket.readyState === WebSocket.OPEN) {
+        sttSocket.send(event.data);
+      }
+    });
+    recorder.start(250);
+    state.sttRecorder = recorder;
+  });
+
+  const closeRecorder = () => {
+    if (state.sttRecorder && state.sttRecorder.state !== 'inactive') {
+      state.sttRecorder.stop();
+    }
+    state.sttRecorder = null;
+  };
+
+  sttSocket.addEventListener('close', closeRecorder);
+  sttSocket.addEventListener('error', closeRecorder);
+}
+
+function stopTranscriptionStream() {
+  if (state.sttRecorder && state.sttRecorder.state !== 'inactive') {
+    state.sttRecorder.stop();
+  }
+  state.sttRecorder = null;
+  if (state.sttSocket && state.sttSocket.readyState === WebSocket.OPEN) {
+    state.sttSocket.close();
+  }
+  state.sttSocket = null;
 }
 
 function leaveCall() {
-  resetJoinButtons();
-  stopLocalSTT();
+  stopTranscriptionStream();
+  toggleControls(false);
 
-  if (pc) {
-    pc.getSenders().forEach((sender) => {
-      if (sender.track) sender.track.stop();
-    });
-    pc.close();
+  for (const peerId of state.peers.keys()) {
+    removePeer(peerId);
   }
-  if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop());
+
+  if (state.localStream) {
+    state.localStream.getTracks().forEach((track) => track.stop());
+    state.localStream = null;
   }
   els.localVideo.srcObject = null;
-  els.remoteVideo.srcObject = null;
-  pc = null;
-  localStream = null;
-  screenActive = false;
-  dataChannel = null;
-  joinedRoomId = null;
+  els.localSubs.textContent = '';
+  els.log.textContent = '';
+  state.transcriptLog = [];
 
   if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
     ws.close();
   }
-  setTimeout(() => {
-    location.reload();
-  }, 0);
+  location.reload();
+}
+
+function replaceVideoTrack(track) {
+  for (const peer of state.peers.values()) {
+    if (peer.videoSender) {
+      peer.videoSender.replaceTrack(track);
+    }
+  }
+}
+
+function downloadTranscript() {
+  if (!state.transcriptLog.length) return;
+  const lines = state.transcriptLog
+    .map((entry) => `[${new Date(entry.ts).toISOString()}] ${entry.speaker}: ${entry.text}`)
+    .join('\n');
+  const blob = new Blob([lines], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `transcript_${state.roomId || 'call'}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function resetJoinButtons() {
   els.join.disabled = false;
   els.leave.disabled = true;
-  els.mic.disabled = true;
-  els.cam.disabled = true;
-  els.share.disabled = true;
-  els.download.disabled = true;
-  updateInviteButtonState();
 }
 
+// UI events
+els.invite.addEventListener('click', copyInviteLink);
+els.room.addEventListener('input', updateInviteButtonState);
+els.name.addEventListener('change', () => {
+  storeDisplayName();
+  if (state.roomId) updateHistory();
+  els.localLabel.textContent = (els.name.value || 'Ви').trim() || 'Ви';
+});
 els.join.addEventListener('click', () => {
   const roomId = els.room.value.trim();
   if (!roomId) {
     alert('Вкажіть ID кімнати');
     return;
   }
-  if (ws.readyState !== WebSocket.OPEN) {
-    alert('WebSocket ще підключається, спробуйте знову за мить.');
+  const displayName = (els.name.value || '').trim() || 'Учасник';
+  const sendJoin = () => sendSignalingMessage({ type: 'join', roomId, displayName });
+  if (ws.readyState === WebSocket.OPEN) {
+    sendJoin();
+  } else if (ws.readyState === WebSocket.CONNECTING) {
+    ws.addEventListener('open', sendJoin, { once: true });
+  } else {
+    alert('Помилка підключення до сигналінгу. Перезавантажте сторінку.');
     return;
   }
-  const displayName = (els.name.value || '').trim();
-  if (displayName) {
-    try {
-      localStorage.setItem('displayName', displayName);
-    } catch (err) {
-      console.warn('Не вдалося зберегти ім’я у localStorage', err);
-    }
-  }
   els.join.disabled = true;
-  ws.send(JSON.stringify({
-    type: 'join',
-    roomId,
-    displayName: displayName || 'Me',
-  }));
-  updateInviteButtonState();
 });
-
-els.leave.addEventListener('click', () => {
-  leaveCall();
-});
-
-els.invite.addEventListener('click', () => {
-  copyInviteLink();
-});
-
+els.leave.addEventListener('click', leaveCall);
 els.mic.addEventListener('click', () => {
-  if (!localStream) return;
-  const track = localStream.getAudioTracks()[0];
+  if (!state.localStream) return;
+  const track = state.localStream.getAudioTracks()[0];
   if (!track) return;
   track.enabled = !track.enabled;
   els.mic.textContent = track.enabled ? '🎤 Мікрофон вкл' : '🔇 Мікрофон викл';
 });
-
 els.cam.addEventListener('click', () => {
-  if (!localStream) return;
-  const track = localStream.getVideoTracks()[0];
+  if (!state.localStream) return;
+  const track = state.localStream.getVideoTracks()[0];
   if (!track) return;
   track.enabled = !track.enabled;
   els.cam.textContent = track.enabled ? '📷 Камера вкл' : '🚫 Камера викл';
 });
-
 els.share.addEventListener('click', async () => {
-  if (screenActive || !pc) return;
+  if (state.screenActive) return;
   try {
     const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
     const screenTrack = displayStream.getVideoTracks()[0];
-    const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-    if (!sender) return;
-    await sender.replaceTrack(screenTrack);
-    screenActive = true;
-
-    screenTrack.onended = async () => {
-      const cameraTrack = localStream?.getVideoTracks()[0];
-      if (cameraTrack && sender) {
-        await sender.replaceTrack(cameraTrack);
+    if (!screenTrack) return;
+    replaceVideoTrack(screenTrack);
+    els.localVideo.srcObject = displayStream;
+    state.screenActive = true;
+    screenTrack.onended = () => {
+      if (state.originalVideoTrack) {
+        replaceVideoTrack(state.originalVideoTrack);
       }
-      screenActive = false;
+      if (state.localStream) {
+        els.localVideo.srcObject = state.localStream;
+      }
+      state.screenActive = false;
     };
   } catch (err) {
     console.warn('Screen share cancelled', err);
   }
 });
+els.download.addEventListener('click', downloadTranscript);
 
-els.download.addEventListener('click', () => {
-  if (!transcriptLog.length) return;
-  const lines = transcriptLog
-    .map((item) => `[${new Date(item.ts).toISOString()}] ${item.speaker}: ${item.text}`)
-    .join('\n');
-  const blob = new Blob([lines], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `transcript_${els.room.value.trim() || 'call'}.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
-});
-
-els.room.addEventListener('input', () => {
-  updateInviteButtonState();
-  const candidateRoom = joinedRoomId || els.room.value.trim();
-  if (candidateRoom) {
-    updateHistory(candidateRoom);
+window.addEventListener('beforeunload', () => {
+  stopTranscriptionStream();
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.close();
   }
-});
-
-els.name.addEventListener('blur', () => {
-  const displayName = (els.name.value || '').trim();
-  try {
-    if (displayName) {
-      localStorage.setItem('displayName', displayName);
-    } else {
-      localStorage.removeItem('displayName');
-    }
-  } catch (err) {
-    console.warn('Не вдалося оновити localStorage', err);
-  }
-  const candidateRoom = joinedRoomId || els.room.value.trim();
-  if (candidateRoom) {
-    updateHistory(candidateRoom);
-  }
-});
-
-els.lang.addEventListener('change', () => {
-  const candidateRoom = joinedRoomId || els.room.value.trim();
-  if (candidateRoom) {
-    updateHistory(candidateRoom);
-  }
-  if (!recognition) return;
-  stopLocalSTT();
-  startLocalSTT();
 });
